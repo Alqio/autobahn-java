@@ -13,19 +13,13 @@ package io.crossbar.autobahn.wamp.transports;
 
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
-import java.util.logging.Logger;
 
 import javax.net.ssl.SSLException;
 
-import io.crossbar.autobahn.wamp.interfaces.ITransport;
-import io.crossbar.autobahn.wamp.interfaces.ITransportHandler;
-import io.crossbar.autobahn.wamp.serializers.CBORSerializer;
-import io.crossbar.autobahn.wamp.serializers.JSONSerializer;
-import io.crossbar.autobahn.wamp.serializers.MessagePackSerializer;
-import io.crossbar.autobahn.wamp.types.WebSocketOptions;
+import java.util.concurrent.TimeUnit;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -49,49 +43,32 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 
+import io.crossbar.autobahn.wamp.interfaces.IMessage;
+import io.crossbar.autobahn.wamp.interfaces.ISerializer;
+import io.crossbar.autobahn.wamp.interfaces.ITransport;
+import io.crossbar.autobahn.wamp.interfaces.ITransportHandler;
+import io.crossbar.autobahn.wamp.serializers.CBORSerializer;
+
 
 public class NettyTransport implements ITransport {
 
-    private static final Logger LOGGER = Logger.getLogger(NettyTransport.class.getName());
-    private static final String SERIALIZERS_DEFAULT = String.format(
-            "%s,%s,%s", CBORSerializer.NAME, MessagePackSerializer.NAME, JSONSerializer.NAME);
-
     private Channel mChannel;
+    private ISerializer mSerializer;
     private final String mUri;
 
     private ExecutorService mExecutor;
-    private WebSocketOptions mOptions;
-    private List<String> mSerializers;
 
+    private  EventLoopGroup group;
+    
+    
     public NettyTransport(String uri) {
         mUri = uri;
-    }
-
-    public NettyTransport(String uri, List<String> serializers) {
-        mUri = uri;
-        mSerializers = serializers;
-    }
-
-    public NettyTransport(String uri, WebSocketOptions options) {
-        this(uri);
-        mOptions = options;
+        mSerializer = new CBORSerializer();
     }
 
     public NettyTransport(String uri, ExecutorService executor) {
         this(uri);
         mExecutor = executor;
-    }
-
-    public NettyTransport(String uri, List<String> serializers, ExecutorService executor) {
-        this(uri);
-        mExecutor = executor;
-        mSerializers = serializers;
-    }
-
-    public NettyTransport(String uri, ExecutorService executor, WebSocketOptions options) {
-        this(uri);
-        mExecutor = executor;
-        mOptions = options;
     }
 
     private ExecutorService getExecutor() {
@@ -101,17 +78,10 @@ public class NettyTransport implements ITransport {
         return mExecutor;
     }
 
-    private WebSocketOptions getOptions() {
-        if (mOptions == null) {
-            mOptions = new WebSocketOptions();
-        }
-        return mOptions;
-    }
-
     private int validateURIAndGetPort(URI uri) {
         String scheme = uri.getScheme();
         if (!"ws".equalsIgnoreCase(scheme) && !"wss".equalsIgnoreCase(scheme)) {
-            throw new IllegalArgumentException("Only WS(S) is supported.");
+            System.err.println("Only WS(S) is supported.");
         }
         int port = uri.getPort();
         if (port == -1) {
@@ -129,15 +99,6 @@ public class NettyTransport implements ITransport {
             return SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).build();
         }
         return null;
-    }
-
-    private String getSerializers() {
-        if (mSerializers != null) {
-            StringBuilder result = new StringBuilder();
-            mSerializers.forEach(s -> result.append(s).append(","));
-            return result.toString();
-        }
-        return SERIALIZERS_DEFAULT;
     }
 
     @Override
@@ -163,11 +124,12 @@ public class NettyTransport implements ITransport {
 
         final NettyWebSocketClientHandler handler = new NettyWebSocketClientHandler(
                 WebSocketClientHandshakerFactory.newHandshaker(
-                        uri, WebSocketVersion.V13, getSerializers(),true,
-                        new DefaultHttpHeaders(), getOptions().getMaxFramePayloadSize()),
-                this, transportHandler);
+                        uri, WebSocketVersion.V13, "wamp.2.cbor",true,
+                        new DefaultHttpHeaders(), 655360),
+                this, transportHandler, mSerializer);
 
-        EventLoopGroup group = new NioEventLoopGroup();
+        group = new NioEventLoopGroup();
+        
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group);
         bootstrap.channel(NioSocketChannel.class);
@@ -187,6 +149,7 @@ public class NettyTransport implements ITransport {
         });
 
         try {
+        	
             mChannel = bootstrap.connect(uri.getHost(), port).sync().channel();
             handler.getHandshakeFuture().sync();
         } catch (InterruptedException e) {
@@ -204,7 +167,8 @@ public class NettyTransport implements ITransport {
         }
         mChannel.writeAndFlush(frame);
     }
-
+    
+    
     @Override
     public boolean isOpen() {
         return mChannel.isOpen();
@@ -212,17 +176,22 @@ public class NettyTransport implements ITransport {
 
     @Override
     public void close() {
-        LOGGER.info("close()");
+        System.out.println("ITransport.close()");
         try {
             mChannel.close().sync();
+            group.shutdownGracefully(1000, 3000, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
     }
+    
+    public boolean isShutdown() {
+    	return group.isShutdown();
+    }
 
     @Override
     public void abort() {
-        LOGGER.info("abort()");
+        System.out.println("ITransport.abort()");
         close();
     }
 
@@ -230,3 +199,4 @@ public class NettyTransport implements ITransport {
         return Unpooled.copiedBuffer(bytes);
     }
 }
+
